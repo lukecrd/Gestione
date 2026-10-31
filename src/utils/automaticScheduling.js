@@ -141,22 +141,25 @@ export function weeklyRoleConflicts(state, programs = {}) {
     .sort((a, b) => a.week.localeCompare(b.week) || a.name.localeCompare(b.name, 'it'));
 }
 
+/** [id, label, rotation key]: the key groups slots of the same part (both prayers share one). */
 function vitaAssignments(meeting) {
   if (meeting.isSpecialEvent) return [];
   return [
-    [meeting.presidenteId, 'Presidente'], [meeting.preghieraInizialeId, 'Preghiera iniziale'],
-    [meeting.tesori1SpeakerId, 'Discorso Tesori'], [meeting.tesoriGemmeSpeakerId, 'Gemme spirituali'],
-    [meeting.tesoriLetturaReaderId, 'Lettura biblica'],
-    ...(meeting.ministeroParts || []).flatMap(p => [[p.studentId, 'Studente ministero'], [p.hasAssistant ? p.assistantId : '', 'Assistente ministero']]),
-    ...(meeting.vitaCristianaParts || []).map(p => [p.speakerId, 'Parte Vita cristiana']),
-    ...(meeting.studioBiblicoType === 'discorsoSorvegliante' ? [] : [[meeting.studioBiblicoConductorId, 'Conduttore studio biblico'], [meeting.studioBiblicoReaderId, 'Lettore studio biblico']]),
-    [meeting.preghieraFinaleId, 'Preghiera finale'],
+    [meeting.presidenteId, 'Presidente', 'presidente'], [meeting.preghieraInizialeId, 'Preghiera iniziale', 'preghiera'],
+    [meeting.tesori1SpeakerId, 'Discorso Tesori', 'tesoriDiscorso'], [meeting.tesoriGemmeSpeakerId, 'Gemme spirituali', 'tesoriGemme'],
+    [meeting.tesoriLetturaReaderId, 'Lettura biblica', 'tesoriLettura'],
+    ...(meeting.ministeroParts || []).flatMap(p => [[p.studentId, 'Studente ministero', 'ministeroStudente'], [p.hasAssistant ? p.assistantId : '', 'Assistente ministero', 'ministeroAssistente']]),
+    ...(meeting.vitaCristianaParts || []).map(p => [p.speakerId, 'Parte Vita cristiana', 'vitaCristianaParti']),
+    ...(meeting.studioBiblicoType === 'discorsoSorvegliante' ? [] : [[meeting.studioBiblicoConductorId, 'Conduttore studio biblico', 'studioBiblicoConduttore'], [meeting.studioBiblicoReaderId, 'Lettore studio biblico', 'studioBiblicoLettore']]),
+    [meeting.preghieraFinaleId, 'Preghiera finale', 'preghiera'],
   ].filter(([id]) => id);
 }
 
 export function vitaAssignmentIds(meeting) {
   return vitaAssignments(meeting).map(([id]) => id);
 }
+
+const isBisogniLocali = part => /bisogni\s+locali/i.test(part.title || '');
 
 /** Fill scarce roles first; relocate a previous choice only to fill a blocked role. */
 export function assignUniqueSlots(tasks, identity) {
@@ -209,9 +212,9 @@ export function generateVitaAssignments(state, data, year, month, programs = {})
   const byId = new Map((data.participants || []).map(p => [p.id, p]));
   const history = [];
   (data.meetings || []).filter(m => !targetIds.has(m.id)).forEach(m =>
-    vitaAssignmentIds(m).forEach(id => {
+    vitaAssignments(m).forEach(([id, , role]) => {
       const key = ledger.identity(byId.get(id));
-      if (key && m.dateStr) history.push({ key, date: m.dateStr });
+      if (key && m.dateStr) history.push({ key, role, date: m.dateStr });
     }));
   const generated = new Map();
   const warnings = [];
@@ -224,26 +227,31 @@ export function generateVitaAssignments(state, data, year, month, programs = {})
       ministeroParts: (original.ministeroParts || []).map(p => ({ ...p })),
       vitaCristianaParts: (original.vitaCristianaParts || []).map(p => ({ ...p })),
     };
+    // Per-part rotation: whoever has gone longest without this part goes first,
+    // then whoever has gone longest without any part, then fewest assignments.
     const stats = new Map();
     for (const assignment of history) {
       if (assignment.date >= m.dateStr) continue;
-      const current = stats.get(assignment.key) || { last: '', count: 0 };
-      current.last = current.last > assignment.date ? current.last : assignment.date;
+      const current = stats.get(assignment.key) || { last: '', count: 0, roles: new Map() };
+      if (current.last < assignment.date) current.last = assignment.date;
+      if ((current.roles.get(assignment.role) || '') < assignment.date) current.roles.set(assignment.role, assignment.date);
       current.count++;
       stats.set(assignment.key, current);
     }
-    const compare = (a, b) => {
-      const sa = stats.get(ledger.identity(a)) || { last: '', count: 0 };
-      const sb = stats.get(ledger.identity(b)) || { last: '', count: 0 };
-      return sa.last.localeCompare(sb.last) || sa.count - sb.count || a.name.localeCompare(b.name, 'it');
+    const empty = { last: '', count: 0, roles: new Map() };
+    const compareFor = role => (a, b) => {
+      const sa = stats.get(ledger.identity(a)) || empty;
+      const sb = stats.get(ledger.identity(b)) || empty;
+      return (sa.roles.get(role) || '').localeCompare(sb.roles.get(role) || '') ||
+        sa.last.localeCompare(sb.last) || sa.count - sb.count || a.name.localeCompare(b.name, 'it');
     };
     if (!m.tesori1Title) m.tesori1SpeakerId = '';
     const tasks = [];
     const addTask = (id, label, role, set, gender, partTypes) => {
-      tasks.push({ id, label, set, candidates: (data.participants || []).filter(p =>
+      tasks.push({ id, label, role, set, candidates: (data.participants || []).filter(p =>
         p.roles?.[role] && (!gender || p.gender === gender) &&
         (!partTypes || isParticipantEligibleForPartTypes(p.roles, partTypes)) &&
-        !ledger.isBusy(p, m.dateStr) && !ledger.isUnavailable(p, m.dateStr)).sort(compare) });
+        !ledger.isBusy(p, m.dateStr) && !ledger.isUnavailable(p, m.dateStr)).sort(compareFor(role)) });
     };
     addTask('presidente', 'Presidente', 'presidente', p => { m.presidenteId = p; }, 'M');
     addTask('iniziale', 'Preghiera iniziale', 'preghiera', p => { m.preghieraInizialeId = p; }, 'M');
@@ -263,8 +271,11 @@ export function generateVitaAssignments(state, data, year, month, programs = {})
         part.assistantId = p;
       });
     });
-    m.vitaCristianaParts.forEach((part, i) =>
-      addTask('vita-' + i, 'Parte ' + part.number, 'vitaCristianaParti', p => { part.speakerId = p; }, 'M'));
+    m.vitaCristianaParts.forEach((part, i) => {
+      // Local needs are assigned by hand.
+      if (isBisogniLocali(part)) { part.speakerId = ''; return; }
+      addTask('vita-' + i, 'Parte ' + part.number, 'vitaCristianaParti', p => { part.speakerId = p; }, 'M');
+    });
     if (m.studioBiblicoType !== 'discorsoSorvegliante') {
       addTask('studio', 'Studio biblico: conduttore', 'studioBiblicoConduttore', p => { m.studioBiblicoConductorId = p; }, 'M');
       addTask('studio-lettore', 'Studio biblico: lettore', 'studioBiblicoLettore', p => { m.studioBiblicoReaderId = p; }, 'M');
@@ -276,7 +287,7 @@ export function generateVitaAssignments(state, data, year, month, programs = {})
       task.set(person?.id || '');
       if (person) {
         ledger.reserve(person, m.dateStr);
-        history.push({ key: ledger.identity(person), date: m.dateStr });
+        history.push({ key: ledger.identity(person), role: task.role, date: m.dateStr });
       } else warnings.push(m.dateStr + ': ' + task.label + ' da assegnare (nessun nominativo idoneo libero).');
     }
     generated.set(m.id, m);
