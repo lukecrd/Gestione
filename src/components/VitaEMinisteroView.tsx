@@ -1,4 +1,4 @@
-import { generateVitaAssignments } from '../utils/automaticScheduling';
+import { generateVitaAssignments, vitaMonthlyRepeats } from '../utils/automaticScheduling';
 import { fetchWolJson } from '../utils/wolApi';
 import React, { useState } from 'react';
 import {
@@ -100,9 +100,9 @@ export function VitaEMinisteroView({
     partIdx?: number;
   } | null>(null);
 
-  // Month & Year state (default to October 2026 matching PDF sample, or current date)
-  const [selectedMonth, setSelectedMonth] = useState<number>(9); // 9 is October (0-indexed)
-  const [selectedYear, setSelectedYear] = useState<number>(2026);
+  // Month & Year state: current month
+  const [selectedMonth, setSelectedMonth] = useState<number>(() => new Date().getMonth());
+  const [selectedYear, setSelectedYear] = useState<number>(() => new Date().getFullYear());
 
   // Get or initialize Vita e Ministero data
   const vmData: VitaEMinisteroData = React.useMemo(() => {
@@ -211,6 +211,7 @@ export function VitaEMinisteroView({
     }
     return true;
   });
+  const monthlyRepeats = vitaMonthlyRepeats(meetingsInMonth, participants);
 
   const handleAutoGenerate = () => {
     if (!checkAdminPermission()) return;
@@ -832,6 +833,13 @@ export function VitaEMinisteroView({
               )}
             </div>
           </div>
+
+          {monthlyRepeats.length > 0 && (
+            <div className="card no-print border-amber-300 bg-amber-50 dark:bg-amber-950/30 text-xs" role="alert">
+              <p className="font-bold mb-2">Stessa persona ripetuta nel mese</p>
+              <ul className="list-disc pl-4 space-y-1">{monthlyRepeats.map((warning, i) => <li key={i}>{warning}</li>)}</ul>
+            </div>
+          )}
 
           {generationWarnings.length > 0 && (
             <div className="card no-print border-amber-300 bg-amber-50 dark:bg-amber-950/30 text-xs" role="status">

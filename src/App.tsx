@@ -759,9 +759,11 @@ export default function App({ utente, onEsci }: { utente: AuthUser; onEsci: () =
       const dates = weeklyDates(monday);
       const unavailIds = state.people.filter(p => ledger.isUnavailable(p, dates) || ledger.isBusy(p, dates)).map(p => p.id);
 
+      // Presidente of Vita e Ministero on this midweek evening cannot also be usciere.
+      const presidenti = new Set(ledger.entries.filter(e => e.program === 'vitaEMinistero' && e.role === 'Presidente' && weeklyDates(e.date)[0] === dates[0]).map(e => e.key));
       const chosenUsc: Person[] = [];
       for (let s = 0; s < 3; s++) {
-        const p = fairPick(uscieriPool.filter(p => !ledger.isBusy(p, dates)), uc, ul, idx, [...unavailIds, ...chosenUsc.map(c => c.id)]);
+        const p = fairPick(uscieriPool.filter(p => !ledger.isBusy(p, dates) && !presidenti.has(ledger.identity(p))), uc, ul, idx, [...unavailIds, ...chosenUsc.map(c => c.id)]);
         if (p) { chosenUsc.push(p); markUsed(p, uc, ul, idx); ledger.reserve(p, dates); }
       }
 

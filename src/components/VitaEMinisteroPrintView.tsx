@@ -21,7 +21,12 @@ export function VitaEMinisteroPrintView({
   data,
   participants,
 }: VitaEMinisteroPrintViewProps) {
-  const [filterPeriod, setFilterPeriod] = useState<string>('all');
+  // Default: current month, if it has meetings.
+  const [filterPeriod, setFilterPeriod] = useState<string>(() => {
+    const now = new Date();
+    const current = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    return (data.meetings || []).some(m => m.dateStr?.startsWith(current)) ? current : 'all';
+  });
 
   // Extract distinct available periods
   const availablePeriods = useMemo(() => {
