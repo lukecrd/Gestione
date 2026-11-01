@@ -27,62 +27,57 @@ export function getS89FileName(studentName: string, partNumber?: string | number
   return `${cleanName} - S-89.pdf`;
 }
 
+/** Formato di stampa del foglietto S-89: 7,5 × 9,5 cm. */
+export const S89_FORMAT: [number, number] = [75, 95];
+
 /**
- * Disegna una singola pagina del foglietto S-89 su un documento jsPDF in formato A4
+ * Disegna una singola pagina del foglietto S-89 (7,5 × 9,5 cm) su un documento jsPDF
  */
 export function renderS89Page(doc: jsPDF, item: S89Item): void {
   const pageWidth = doc.internal.pageSize.getWidth();
-  const margin = 6;
+  const margin = 5;
   const rightEdge = pageWidth - margin;
+  const dotted = (from: number, yy: number) => {
+    if (from >= rightEdge) return;
+    doc.setDrawColor(150, 150, 150);
+    doc.setLineWidth(0.2);
+    doc.setLineDashPattern([0.6, 0.9], 0);
+    doc.line(from, yy + 0.4, rightEdge, yy + 0.4);
+    doc.setLineDashPattern([], 0);
+  };
 
   // Intestazione
   doc.setTextColor(20, 20, 20);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(13);
-  doc.text('PARTE PER L’ADUNANZA', pageWidth / 2, 16, { align: 'center' });
-  doc.text('VITA CRISTIANA E MINISTERO', pageWidth / 2, 23, { align: 'center' });
+  doc.setFontSize(9.5);
+  doc.text('PARTE PER L’ADUNANZA', pageWidth / 2, 9, { align: 'center' });
+  doc.text('VITA CRISTIANA E MINISTERO', pageWidth / 2, 13.5, { align: 'center' });
 
-  let y = 37;
-  const lineSpacing = 11;
+  let y = 21;
+  const lineSpacing = 7.5;
 
   const drawField = (label: string, val?: string) => {
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
+    doc.setFontSize(8.5);
     const fullLabel = label + ': ';
     doc.text(fullLabel, margin, y);
-    const labelWidth = doc.getTextWidth(fullLabel);
-
-    if (val && val.trim()) {
+    const valueX = margin + doc.getTextWidth(fullLabel) + 0.5;
+    const cleanVal = val?.trim() || '';
+    if (cleanVal) {
+      // Valori lunghi: carattere più piccolo, poi troncati, per restare su una riga.
       doc.setFont('helvetica', 'normal');
-      const cleanVal = val.trim();
-      doc.text(cleanVal, margin + labelWidth + 1, y);
-      const valWidth = doc.getTextWidth(cleanVal);
-      const dashStart = margin + labelWidth + valWidth + 2;
-      if (dashStart < rightEdge) {
-        doc.setDrawColor(150, 150, 150);
-        doc.setLineDashPattern([0.8, 1.2], 0);
-        doc.line(dashStart, y + 0.5, rightEdge, y + 0.5);
-        doc.setLineDashPattern([], 0);
-      }
-    } else {
-      doc.setDrawColor(150, 150, 150);
-      doc.setLineDashPattern([0.8, 1.2], 0);
-      doc.line(margin + labelWidth, y + 0.5, rightEdge, y + 0.5);
-      doc.setLineDashPattern([], 0);
-    }
+      let size = 8.5;
+      while (size > 6 && doc.setFontSize(size).getTextWidth(cleanVal) > rightEdge - valueX) size -= 0.5;
+      const text = doc.splitTextToSize(cleanVal, rightEdge - valueX)[0];
+      doc.text(text, valueX, y);
+      dotted(valueX + doc.getTextWidth(text) + 1, y);
+    } else dotted(valueX, y);
     y += lineSpacing;
   };
 
-  // 1. Nome e cognome studente
   drawField('Nome e cognome', item.studentName);
-
-  // 2. Assistente (se presente)
   drawField('Assistente', item.assistantName);
-
-  // 3. Data
   drawField('Data', item.dateLabel);
-
-  // 4. Parte n.
   const partDisplay = item.partTitle
     ? `${item.partNumber} - ${item.partTitle}`
     : item.partNumber
@@ -90,12 +85,12 @@ export function renderS89Page(doc: jsPDF, item: S89Item): void {
     : '';
   drawField('Parte n.', partDisplay);
 
-  // 5. Da svolgere nella:
-  y += 3;
+  // Da svolgere nella:
+  y += 2;
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(11);
+  doc.setFontSize(8.5);
   doc.text('Da svolgere nella:', margin, y);
-  y += 6;
+  y += 4.5;
 
   const activeRoom = item.room || 'main';
   const rooms: Array<{ key: 'main' | 'aux1' | 'aux2'; label: string }> = [
@@ -105,47 +100,32 @@ export function renderS89Page(doc: jsPDF, item: S89Item): void {
   ];
 
   rooms.forEach(r => {
-    const isChecked = activeRoom === r.key;
-    // Casella di spunta (checkbox quadrata fedele all'originale)
     doc.setDrawColor(30, 30, 30);
-    doc.setLineWidth(0.4);
-    doc.rect(margin + 1, y - 3.8, 4.4, 4.4);
-
-    if (isChecked) {
-      doc.setLineWidth(0.65);
-      // Spunta elegante (checkmark)
-      doc.line(margin + 1.8, y - 1.4, margin + 2.8, y - 0.4);
-      doc.line(margin + 2.8, y - 0.4, margin + 4.6, y - 3.0);
+    doc.setLineWidth(0.3);
+    doc.rect(margin + 0.8, y - 2.8, 3.2, 3.2);
+    if (activeRoom === r.key) {
+      doc.setLineWidth(0.5);
+      doc.line(margin + 1.4, y - 1.1, margin + 2.1, y - 0.3);
+      doc.line(margin + 2.1, y - 0.3, margin + 3.4, y - 2.2);
     }
-
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(10.5);
-    doc.text(r.label, margin + 8.5, y);
-    y += 6.5;
+    doc.setFontSize(8);
+    doc.text(r.label, margin + 6, y);
+    y += 4.8;
   });
 
-  // 6. Nota per lo studente
-  y += 6;
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.8);
-  doc.text('Nota per lo studente: ', margin, y);
-  const prefixW = doc.getTextWidth('Nota per lo studente: ');
+  // Nota per lo studente
+  y += 2;
   doc.setFont('helvetica', 'normal');
-
+  doc.setFontSize(6.5);
   const noteParagraph =
     'La fonte e la lezione che riguardano la tua parte sono indicate nella Guida per l’adunanza Vita e ministero. Ripassa le Istruzioni per l’adunanza Vita cristiana e ministero (S-38) relative alla tua parte.';
+  doc.text(doc.splitTextToSize('Nota per lo studente: ' + noteParagraph, rightEdge - margin), margin, y, { lineHeightFactor: 1.3 });
 
-  // Gestione testo a capo proporzionato alla larghezza del foglietto
-  const splitLines = doc.splitTextToSize('Nota per lo studente: ' + noteParagraph, rightEdge - margin);
-  
-  // Ridisegniamo le linee con stile pulito
-  doc.text(splitLines, margin, y, { lineHeightFactor: 1.35 });
-
-  // 7. Codice modulo S-89-I 11/23 in basso a sinistra
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
+  // Codice modulo in basso a sinistra
+  doc.setFontSize(6);
   doc.setTextColor(60, 60, 60);
-  doc.text('S-89-I   11/23', margin, doc.internal.pageSize.getHeight() - margin);
+  doc.text('S-89-I   11/23', margin, doc.internal.pageSize.getHeight() - 4);
 }
 
 /**
@@ -153,16 +133,9 @@ export function renderS89Page(doc: jsPDF, item: S89Item): void {
  * Il nome del file conterrà il nome dello studente (es. "Mario Rossi - S-89.pdf")
  */
 export function downloadS89Pdf(item: S89Item): void {
-  const doc = new jsPDF({
-    orientation: 'portrait',
-    unit: 'mm',
-    format: 'a4', // 210 x 297 mm
-  });
-
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: S89_FORMAT });
   renderS89Page(doc, item);
-
-  const filename = getS89FileName(item.studentName, item.partNumber);
-  doc.save(filename);
+  doc.save(getS89FileName(item.studentName, item.partNumber));
 }
 
 /**
@@ -170,20 +143,10 @@ export function downloadS89Pdf(item: S89Item): void {
  */
 export function downloadCombinedS89Pdf(items: S89Item[], customFileName?: string): void {
   if (!items || items.length === 0) return;
-
-  const doc = new jsPDF({
-    orientation: 'portrait',
-    unit: 'mm',
-    format: 'a4',
-  });
-
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: S89_FORMAT });
   items.forEach((item, index) => {
-    if (index > 0) {
-      doc.addPage('a4', 'portrait');
-    }
+    if (index > 0) doc.addPage(S89_FORMAT, 'portrait');
     renderS89Page(doc, item);
   });
-
-  const filename = customFileName || `Foglietti_S-89_Vita_e_Ministero.pdf`;
-  doc.save(filename);
+  doc.save(customFileName || `Foglietti_S-89_Vita_e_Ministero.pdf`);
 }
