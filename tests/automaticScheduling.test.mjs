@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSchedulingLedger, weeklyDates, generateVitaAssignments, vitaAssignmentIds, assignUniqueSlots, weeklyRoleConflicts, weekKey } from '../src/utils/automaticScheduling.js';
+import { createSchedulingLedger, weeklyDates, generateVitaAssignments, vitaAssignmentIds, assignUniqueSlots, weeklyRoleConflicts, weekKey, vitaMonthlyRepeats } from '../src/utils/automaticScheduling.js';
 
 const person = (id, name = id) => ({ id, name, gender: 'M', spouseId: null, roles: {} });
 const participant = (id, roles = { tesoriLettura: true }, personId) => ({ id, name: id, gender: 'M', personId, roles });
@@ -347,4 +347,26 @@ test('Bisogni locali is left empty and does not produce a warning', () => {
   assert.equal(parts[0].speakerId, '');
   assert.equal(parts[1].speakerId, 'A');
   assert.equal(result.warnings.some(w => w.includes('Parte 7')), false);
+});
+
+test('presidente not repeated in the same month when someone else is free; repeats are flagged', () => {
+  const participants = [participant('a', { presidente: true }), participant('b', { presidente: true, preghiera: true }), participant('c', { preghiera: true }), participant('d', { preghiera: true })];
+  const { meetings } = generate(participants, [meeting('w1', '2026-10-05'), meeting('w2', '2026-10-12')]);
+  assert.notEqual(meetings[0].presidenteId, meetings[1].presidenteId);
+  assert.deepEqual(vitaMonthlyRepeats(meetings, participants), []);
+  const repeated = [meeting('x', '2026-10-05', { presidenteId: 'a', studioBiblicoType: 'studio', studioBiblicoConductorId: 'b' }),
+    meeting('y', '2026-10-12', { presidenteId: 'a', studioBiblicoType: 'studio', studioBiblicoConductorId: 'b' }),
+    meeting('z', '2026-11-02', { presidenteId: 'a' })];
+  assert.equal(vitaMonthlyRepeats(repeated, participants).length, 2);
+});
+
+test('presidente avoids the usciere of the same midweek evening', () => {
+  const participants = [participant('Anna', { presidente: true }), participant('Bruno', { presidente: true })];
+  const mensileRows = [{ date: '2026-10-05', ingresso: ['Anna', '—'], auditorium: '—', microfoni: [], audioVideo: [] }];
+  const { meetings, warnings } = generate(participants, [meeting('w1', '2026-10-05')], {}, { mensileRows });
+  assert.equal(meetings[0].presidenteId, 'Bruno');
+  assert.ok(!warnings.some(w => w.includes('usciere')));
+  const solo = generate([participants[0]], [meeting('w1', '2026-10-05')], {}, { mensileRows });
+  assert.equal(solo.meetings[0].presidenteId, 'Anna');
+  assert.ok(solo.warnings.some(w => w.includes('usciere')));
 });

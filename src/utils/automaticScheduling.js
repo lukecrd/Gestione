@@ -159,6 +159,25 @@ export function vitaAssignmentIds(meeting) {
   return vitaAssignments(meeting).map(([id]) => id);
 }
 
+const MONTHLY_UNIQUE_ROLES = [['presidenteId', 'Presidente'], ['studioBiblicoConductorId', 'Conduttore studio biblico']];
+
+/** Same person twice in one month as Presidente or as Conduttore studio biblico. */
+export function vitaMonthlyRepeats(meetings, participants) {
+  const names = new Map((participants || []).map(p => [p.id, p.name]));
+  const seen = new Map();
+  const warnings = [];
+  [...(meetings || [])].filter(m => m.dateStr && !m.isSpecialEvent).sort((a, b) => a.dateStr.localeCompare(b.dateStr))
+    .forEach(m => MONTHLY_UNIQUE_ROLES.forEach(([field, label]) => {
+      const id = field === 'studioBiblicoConductorId' && m.studioBiblicoType === 'discorsoSorvegliante' ? '' : m[field];
+      if (!id) return;
+      const key = m.dateStr.slice(0, 7) + '|' + field + '|' + id;
+      const first = seen.get(key);
+      if (first) warnings.push(`${m.dateStr}: ${names.get(id) || id} è già ${label} il ${first} nello stesso mese.`);
+      else seen.set(key, m.dateStr);
+    }));
+  return warnings;
+}
+
 const isBisogniLocali = part => /bisogni\s+locali/i.test(part.title || '');
 
 /** Fill scarce roles first; relocate a previous choice only to fill a blocked role. */
@@ -218,9 +237,17 @@ export function generateVitaAssignments(state, data, year, month, programs = {})
     }));
   const generated = new Map();
   const warnings = [];
+  // Presidente / conduttore studio già usati in questo mese: in coda ai candidati, non esclusi.
+  const usedThisMonth = { presidente: new Set(), studio: new Set() };
+  const markUsed = meeting => {
+    if (meeting.presidenteId) usedThisMonth.presidente.add(ledger.identity(byId.get(meeting.presidenteId)));
+    if (meeting.studioBiblicoConductorId && meeting.studioBiblicoType !== 'discorsoSorvegliante')
+      usedThisMonth.studio.add(ledger.identity(byId.get(meeting.studioBiblicoConductorId)));
+  };
   for (const original of targets) {
     if (state.special?.[original.dateStr]) {
       warnings.push(original.dateStr + ': data speciale, assegnazioni non rigenerate.');
+      markUsed(original);
       continue;
     }
     const m = { ...original,
@@ -246,12 +273,17 @@ export function generateVitaAssignments(state, data, year, month, programs = {})
         sa.last.localeCompare(sb.last) || sa.count - sb.count || a.name.localeCompare(b.name, 'it');
     };
     if (!m.tesori1Title) m.tesori1SpeakerId = '';
+    // Uscieri of the same evening (monthly programme, midweek date): not presidente too.
+    const evening = weeklyDates(m.dateStr)[0];
+    const uscieri = new Set(ledger.entries.filter(e => e.program === 'mensile' && e.date === evening && e.role.startsWith('Usciere')).map(e => e.key));
+    const avoid = (id, p) => (usedThisMonth[id]?.has(ledger.identity(p)) ? 1 : 0) + (id === 'presidente' && uscieri.has(ledger.identity(p)) ? 2 : 0);
     const tasks = [];
     const addTask = (id, label, role, set, gender, partTypes) => {
       tasks.push({ id, label, role, set, candidates: (data.participants || []).filter(p =>
         p.roles?.[role] && (!gender || p.gender === gender) &&
         (!partTypes || isParticipantEligibleForPartTypes(p.roles, partTypes)) &&
-        !ledger.isBusy(p, m.dateStr) && !ledger.isUnavailable(p, m.dateStr)).sort(compareFor(role)) });
+        !ledger.isBusy(p, m.dateStr) && !ledger.isUnavailable(p, m.dateStr)).sort((a, b) =>
+        avoid(id, a) - avoid(id, b) || compareFor(role)(a, b)) });
     };
     addTask('presidente', 'Presidente', 'presidente', p => { m.presidenteId = p; }, 'M');
     addTask('iniziale', 'Preghiera iniziale', 'preghiera', p => { m.preghieraInizialeId = p; }, 'M');
@@ -290,6 +322,10 @@ export function generateVitaAssignments(state, data, year, month, programs = {})
         history.push({ key: ledger.identity(person), role: task.role, date: m.dateStr });
       } else warnings.push(m.dateStr + ': ' + task.label + ' da assegnare (nessun nominativo idoneo libero).');
     }
+    const president = byId.get(m.presidenteId);
+    if (president && uscieri.has(ledger.identity(president)))
+      warnings.push(m.dateStr + ': ' + president.name + ' è presidente e anche usciere nella stessa sera (nessun altro presidente libero).');
+    markUsed(m);
     generated.set(m.id, m);
   }
   return { meetings: (data.meetings || []).map(m => generated.get(m.id) || m), warnings, generatedCount: generated.size };
