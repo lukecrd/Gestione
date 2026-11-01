@@ -385,7 +385,8 @@ export function ServizioCampoView({
           ...existing,
           location: isKnownLocation(existing.location) ? existing.location : assignedLocation,
           meetingType: existing.meetingType || (holidayName ? 'festivo' : 'standard'),
-          specialNote: existing.specialNote || holidayName || specialNoteFromGlobal
+          // Il nome della festività non va nelle note (anche se salvato in passato).
+          specialNote: (existing.specialNote && existing.specialNote !== holidayName ? existing.specialNote : '') || specialNoteFromGlobal
         };
       }
 
@@ -401,7 +402,7 @@ export function ServizioCampoView({
         location: assignedLocation,
         conductorId: null,
         isActive: slotDef.active !== false,
-        specialNote: holidayName ? `${holidayName}` : (specialNoteFromGlobal || ''),
+        specialNote: specialNoteFromGlobal,
         notes: ''
       };
       return newMeeting;
