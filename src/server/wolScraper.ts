@@ -1,39 +1,42 @@
 import * as cheerio from 'cheerio';
+import JSZip from 'jszip';
 import type { VitaEMinisteroMeeting, MinisteroPart, VitaCristianaPart } from '../types.js';
 import { inferPartTypeIds } from '../utils/ministeroPartTypes.js';
 
-const WOL_BASE = 'https://wol.jw.org';
-const WOL_INDEX = `${WOL_BASE}/it/wol/library/r6/lp-i/tutte-le-pubblicazioni/guida-per-ladunanza`;
+// wol.jw.org blocks server requests with an AWS WAF challenge, so we use the
+// official jw-cdn publication API and parse the EPUB of each bimonthly issue.
+const PUB_MEDIA_API = 'https://b.jw-cdn.org/apis/pub-media/GETPUBMEDIALINKS';
+const LANG = 'I';
+const FIRST_YEAR = 2020;
 
 const IT_MONTHS = [
   'gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno',
   'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre'
 ];
 
-const ISSUE_SLUGS = [
-  { slug: 'gennaio', months: [1, 2], label: 'Gennaio - Febbraio' },
-  { slug: 'marzo', months: [3, 4], label: 'Marzo - Aprile' },
-  { slug: 'maggio', months: [5, 6], label: 'Maggio - Giugno' },
-  { slug: 'luglio', months: [7, 8], label: 'Luglio - Agosto' },
-  { slug: 'settembre', months: [9, 10], label: 'Settembre - Ottobre' },
-  { slug: 'novembre', months: [11, 12], label: 'Novembre - Dicembre' },
-];
+// Each issue covers two months and starts on an odd month (01, 03, ..., 11)
+const ISSUE_START_MONTHS = [1, 3, 5, 7, 9, 11];
 
-// In-memory cache for parsed meetings: key = "year-month" or "docId"
-const meetingCache = new Map<string, VitaEMinisteroMeeting>();
-const monthCache = new Map<string, VitaEMinisteroMeeting[]>();
+// In-memory cache of successfully parsed issues: key = "YYYYMM"
+const issueCache = new Map<string, VitaEMinisteroMeeting[]>();
 
-async function fetchHtml(url: string): Promise<string> {
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
-    },
-  });
+function issueCode(year: number, month: number): string {
+  const start = month % 2 === 1 ? month : month - 1;
+  return `${year}${String(start).padStart(2, '0')}`;
+}
+
+/**
+ * Returns the EPUB download URL of an issue, or null if it is not published.
+ */
+async function getIssueEpubUrl(issue: string): Promise<string | null> {
+  const url = `${PUB_MEDIA_API}?pub=mwb&issue=${issue}&langwritten=${LANG}&fileformat=EPUB&output=json`;
+  const res = await fetch(url);
+  if (res.status === 404) return null;
   if (!res.ok) {
-    throw new Error(`Errore caricamento da wol.jw.org (${res.status}): ${url}`);
+    throw new Error(`Errore caricamento da jw.org (${res.status}): fascicolo ${issue}`);
   }
-  return await res.text();
+  const data = await res.json();
+  return data?.files?.[LANG]?.EPUB?.[0]?.file?.url ?? null;
 }
 
 /**
@@ -41,7 +44,7 @@ async function fetchHtml(url: string): Promise<string> {
  */
 function parseWeekHeader(rawTxt: string, year: number): { day: number; month: number; dateLabel: string; iso: string } | null {
   const clean = rawTxt.toLowerCase().replace(/[º°]/g, '').replace(/\s+/g, ' ').trim();
-  
+
   // Format 1: "28 settembre – 4 ottobre"
   const m1 = clean.match(/^(\d+)\s+([a-z]+)/);
   if (m1) {
@@ -78,25 +81,12 @@ function parseWeekHeader(rawTxt: string, year: number): { day: number; month: nu
 }
 
 /**
- * Parses an individual meeting article from wol.jw.org
+ * Parses the XHTML of a single meeting week (one chapter of the EPUB)
  */
-export async function parseMeetingArticle(docIdOrUrl: string, year: number): Promise<VitaEMinisteroMeeting | null> {
-  let url = docIdOrUrl;
-  if (docIdOrUrl.startsWith('http')) {
-    url = docIdOrUrl;
-  } else if (docIdOrUrl.startsWith('/')) {
-    url = `${WOL_BASE}${docIdOrUrl}`;
-  } else {
-    url = `${WOL_BASE}/it/wol/d/r6/lp-i/${docIdOrUrl}`;
-  }
-
-  const cacheKey = `${year}_${url}`;
-  if (meetingCache.has(cacheKey)) {
-    return meetingCache.get(cacheKey)!;
-  }
-
-  const html = await fetchHtml(url);
+export function parseMeetingHtml(html: string, year: number): VitaEMinisteroMeeting | null {
   const $ = cheerio.load(html);
+  // Drop the Bible text footnotes appended at the end of each chapter
+  $('.groupExt, aside').remove();
 
   const rawHeaderDate = $('h1').first().text().replace(/\s+/g, ' ').trim();
   const dateInfo = parseWeekHeader(rawHeaderDate, year);
@@ -105,11 +95,6 @@ export async function parseMeetingArticle(docIdOrUrl: string, year: number): Pro
   }
 
   const reading = $('header h2').first().text().replace(/\s+/g, ' ').trim();
-
-  // Initial song
-  const initialH3 = $('h3').first().text().replace(/\s+/g, ' ').trim();
-  const initialSongMatch = initialH3.match(/Cantico\s*(\d+)/i);
-  const canticoIniziale = initialSongMatch ? `Cantico ${initialSongMatch[1]}` : '';
 
   // TESORI
   let tesori1Title = '';
@@ -143,30 +128,43 @@ export async function parseMeetingArticle(docIdOrUrl: string, year: number): Pro
     }
   });
 
-  // EFFICACI NEL MINISTERO & VITA CRISTIANA
+  // SONGS, EFFICACI NEL MINISTERO & VITA CRISTIANA
   const ministeroParts: MinisteroPart[] = [];
   const vitaCristianaParts: VitaCristianaPart[] = [];
+  let canticoIniziale = '';
   let canticoIntermedio = '';
   let studioBiblicoTitle = 'Studio biblico di congregazione';
   let studioBiblicoMinutes = 30;
   let canticoFinale = '';
 
-  let currentSection = ''; // 'tesori' | 'ministero' | 'vita'
+  let currentSection = ''; // '' (intro) | 'tesori' | 'ministero' | 'vita' | 'conclusione'
 
-  $('h2, h3').each((_, el) => {
+  $('h2, h3, p').each((_, el) => {
+    const tag = (el as any).tagName;
     const text = $(el).text().replace(/\s+/g, ' ').trim();
-    if (text.includes('TESORI DELLA PAROLA')) {
+    if (tag === 'h2' && text.includes('TESORI DELLA PAROLA')) {
       currentSection = 'tesori';
       return;
     }
-    if (text.includes('EFFICACI NEL MINISTERO')) {
+    if (tag === 'h2' && text.includes('EFFICACI NEL MINISTERO')) {
       currentSection = 'ministero';
       return;
     }
-    if (text.includes('VITA CRISTIANA')) {
+    if (tag === 'h2' && text.includes('VITA CRISTIANA')) {
       currentSection = 'vita';
       return;
     }
+
+    const songMatch = text.match(/^Cantico\s*(\d+)/i);
+    if (songMatch) {
+      const song = `Cantico ${songMatch[1]}`;
+      if (currentSection === '' && !canticoIniziale) canticoIniziale = song;
+      else if (currentSection === 'vita' && !canticoIntermedio) canticoIntermedio = song;
+      else if (currentSection === 'conclusione' && !canticoFinale) canticoFinale = song;
+      return;
+    }
+
+    if (tag !== 'h3') return;
 
     if (currentSection === 'ministero') {
       const matchNum = text.match(/^(\d+)\.\s*(.+)/);
@@ -194,11 +192,6 @@ export async function parseMeetingArticle(docIdOrUrl: string, year: number): Pro
     }
 
     if (currentSection === 'vita') {
-      const songMatch = text.match(/^Cantico\s*(\d+)/i);
-      if (songMatch && !canticoIntermedio) {
-        canticoIntermedio = `Cantico ${songMatch[1]}`;
-        return;
-      }
       if (text.includes('Studio biblico di congregazione')) {
         studioBiblicoTitle = 'Studio biblico di congregazione';
         const m = $(el).next('div').text().match(/\((\d+)\s*min\)/);
@@ -206,10 +199,12 @@ export async function parseMeetingArticle(docIdOrUrl: string, year: number): Pro
         return;
       }
       if (text.includes('Commenti conclusivi')) {
+        // Older layouts put the final song in the heading itself
         const finalSongMatch = text.match(/Cantico\s*(\d+)/i);
         if (finalSongMatch) {
           canticoFinale = `Cantico ${finalSongMatch[1]}`;
         }
+        currentSection = 'conclusione';
         return;
       }
       const matchNum = text.match(/^(\d+)\.\s*(.+)/);
@@ -229,7 +224,7 @@ export async function parseMeetingArticle(docIdOrUrl: string, year: number): Pro
     }
   });
 
-  const meeting: VitaEMinisteroMeeting = {
+  return {
     id: `vm_wol_${dateInfo.iso}`,
     dateStr: dateInfo.iso,
     dateLabel: dateInfo.dateLabel,
@@ -248,42 +243,67 @@ export async function parseMeetingArticle(docIdOrUrl: string, year: number): Pro
     studioBiblicoMinutes,
     canticoFinale,
   };
-
-  meetingCache.set(cacheKey, meeting);
-  return meeting;
 }
 
 /**
- * Returns available years of mwb from wol.jw.org
+ * Downloads and parses all meetings of a bimonthly issue.
+ * Returns null if the issue is not published yet.
+ */
+async function fetchIssueMeetings(year: number, startMonth: number): Promise<VitaEMinisteroMeeting[] | null> {
+  const issue = issueCode(year, startMonth);
+  if (issueCache.has(issue)) {
+    return issueCache.get(issue)!;
+  }
+
+  const epubUrl = await getIssueEpubUrl(issue);
+  if (!epubUrl) return null;
+
+  const res = await fetch(epubUrl);
+  if (!res.ok) {
+    throw new Error(`Errore download EPUB da jw.org (${res.status}): fascicolo ${issue}`);
+  }
+  const zip = await JSZip.loadAsync(await res.arrayBuffer());
+
+  const chapterNames = Object.keys(zip.files)
+    .filter(name => name.endsWith('.xhtml') && !name.endsWith('-extracted.xhtml'))
+    .sort();
+
+  const meetings: VitaEMinisteroMeeting[] = [];
+  for (const name of chapterNames) {
+    const html = await zip.files[name].async('string');
+    if (!html.includes('docClass-106')) continue; // only weekly meeting chapters
+    try {
+      const meeting = parseMeetingHtml(html, year);
+      if (meeting && !meetings.some(m => m.dateStr === meeting.dateStr)) {
+        meetings.push(meeting);
+      }
+    } catch (e) {
+      console.error(`Failed to parse ${name} of issue ${issue}:`, e);
+    }
+  }
+
+  meetings.sort((a, b) => (a.dateStr || '').localeCompare(b.dateStr || ''));
+  if (meetings.length) issueCache.set(issue, meetings);
+  return meetings;
+}
+
+/**
+ * Returns available years of mwb from jw.org
  */
 export async function getAvailableYears(): Promise<{ year: number; title: string }[]> {
+  let lastYear = new Date().getFullYear();
   try {
-    const html = await fetchHtml(WOL_INDEX);
-    const $ = cheerio.load(html);
-    const years: { year: number; title: string }[] = [];
-
-    $('a').each((_, el) => {
-      const href = $(el).attr('href') || '';
-      if (href.includes('guida-per-ladunanza-vita-e-ministero-')) {
-        const title = $(el).text().replace(/\s+/g, ' ').trim();
-        const yMatch = href.match(/\d{4}$/);
-        if (yMatch) {
-          const year = parseInt(yMatch[0], 10);
-          years.push({ year, title });
-        }
-      }
-    });
-
-    years.sort((a, b) => b.year - a.year);
-    return years;
+    // Next year's first issue is usually published a couple of months in advance
+    if (await getIssueEpubUrl(`${lastYear + 1}01`)) lastYear++;
   } catch (err) {
     console.error('getAvailableYears error:', err);
-    // Fallback list of years
-    return [2027, 2026, 2025, 2024, 2023, 2022, 2021, 2020].map(y => ({
-      year: y,
-      title: `Guida per l’adunanza Vita e ministero ${y}`,
-    }));
   }
+
+  const years: { year: number; title: string }[] = [];
+  for (let y = lastYear; y >= FIRST_YEAR; y--) {
+    years.push({ year: y, title: `Guida per l’adunanza Vita e ministero ${y}` });
+  }
+  return years;
 }
 
 /**
@@ -291,51 +311,9 @@ export async function getAvailableYears(): Promise<{ year: number; title: string
  * @param month 1-12 (1 = Gennaio, 10 = Ottobre)
  */
 export async function fetchMonthMeetings(year: number, month: number): Promise<VitaEMinisteroMeeting[]> {
-  const monthCacheKey = `${year}_${month}`;
-  if (monthCache.has(monthCacheKey)) {
-    return monthCache.get(monthCacheKey)!;
-  }
-
-  // Determine which issue covers this month
-  const issue = ISSUE_SLUGS.find(i => i.months.includes(month)) || ISSUE_SLUGS[4];
-  const issueUrl = `${WOL_INDEX}/guida-per-ladunanza-vita-e-ministero-${year}/${issue.slug}`;
-
-  const html = await fetchHtml(issueUrl);
-  const $ = cheerio.load(html);
-
-  // Find article links
-  const articleLinks: string[] = [];
-  $('a').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    if (href.match(/\/it\/wol\/d\/r6\/lp-i\/\d+/)) {
-      if (!articleLinks.includes(href)) {
-        articleLinks.push(href);
-      }
-    }
-  });
-
-  const parsedMeetings: VitaEMinisteroMeeting[] = [];
-
-  for (const link of articleLinks) {
-    try {
-      const meeting = await parseMeetingArticle(link, year);
-      if (meeting && meeting.dateStr) {
-        const parts = meeting.dateStr.split('-');
-        const m = parseInt(parts[1], 10);
-        if (m === month) {
-          parsedMeetings.push(meeting);
-        }
-      }
-    } catch (e) {
-      console.error(`Failed to parse article ${link}:`, e);
-    }
-  }
-
-  // Sort by date ascending
-  parsedMeetings.sort((a, b) => (a.dateStr || '').localeCompare(b.dateStr || ''));
-
-  monthCache.set(monthCacheKey, parsedMeetings);
-  return parsedMeetings;
+  const meetings = await fetchIssueMeetings(year, month);
+  if (!meetings) return [];
+  return meetings.filter(m => parseInt((m.dateStr || '').split('-')[1], 10) === month);
 }
 
 /**
@@ -344,34 +322,16 @@ export async function fetchMonthMeetings(year: number, month: number): Promise<V
 export async function fetchAllYearMeetings(year: number): Promise<VitaEMinisteroMeeting[]> {
   const allMeetings: VitaEMinisteroMeeting[] = [];
 
-  for (const issue of ISSUE_SLUGS) {
+  for (const startMonth of ISSUE_START_MONTHS) {
     try {
-      const issueUrl = `${WOL_INDEX}/guida-per-ladunanza-vita-e-ministero-${year}/${issue.slug}`;
-      const html = await fetchHtml(issueUrl);
-      const $ = cheerio.load(html);
-
-      const articleLinks: string[] = [];
-      $('a').each((_, el) => {
-        const href = $(el).attr('href') || '';
-        if (href.match(/\/it\/wol\/d\/r6\/lp-i\/\d+/)) {
-          if (!articleLinks.includes(href)) {
-            articleLinks.push(href);
-          }
-        }
-      });
-
-      for (const link of articleLinks) {
-        try {
-          const meeting = await parseMeetingArticle(link, year);
-          if (meeting && !allMeetings.some(m => m.dateStr === meeting.dateStr)) {
-            allMeetings.push(meeting);
-          }
-        } catch (e) {
-          console.error(`Failed to parse ${link}:`, e);
+      const meetings = await fetchIssueMeetings(year, startMonth);
+      for (const meeting of meetings || []) {
+        if (!allMeetings.some(m => m.dateStr === meeting.dateStr)) {
+          allMeetings.push(meeting);
         }
       }
     } catch (err) {
-      console.warn(`Issue ${issue.slug} not available for year ${year}:`, err);
+      console.warn(`Issue ${issueCode(year, startMonth)} not available:`, err);
     }
   }
 
